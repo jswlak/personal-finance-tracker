@@ -1,13 +1,13 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import sqlite3
+import json
 import csv
 import requests
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import pandas as pd
 from datetime import datetime, timedelta
-import json
+import os
 
 class PersonalFinanceTracker:
     def __init__(self, root):
@@ -20,74 +20,49 @@ class PersonalFinanceTracker:
         self.base_currency = "USD"
         self.current_currency = "USD"
         
-        self.create_db()
+        # Data storage files
+        self.data_dir = "data"
+        self.income_file = os.path.join(self.data_dir, "income.json")
+        self.expenses_file = os.path.join(self.data_dir, "expenses.json")
+        self.rates_file = os.path.join(self.data_dir, "exchange_rates.json")
+        
+        # Initialize data storage
+        self.setup_data_storage()
         self.setup_ui()
         self.load_exchange_rates()
         self.refresh_data()
 
-    def create_db(self):
-        """Create database with enhanced schema for income, expenses, and currencies"""
-        self.conn = sqlite3.connect("expenses.db")
-        self.cur = self.conn.cursor()
+    def setup_data_storage(self):
+        """Setup data storage directory and files"""
+        # Create data directory if it doesn't exist
+        if not os.path.exists(self.data_dir):
+            os.makedirs(self.data_dir)
         
-        # Expenses table
-        self.cur.execute("""
-            CREATE TABLE IF NOT EXISTS expenses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL,
-                category TEXT,
-                description TEXT,
-                amount REAL NOT NULL,
-                currency TEXT DEFAULT 'USD',
-                transaction_type TEXT DEFAULT 'expense'
-            )
-        """)
+        # Initialize data files if they don't exist
+        if not os.path.exists(self.income_file):
+            self.save_json_file(self.income_file, [])
         
-        # Income table
-        self.cur.execute("""
-            CREATE TABLE IF NOT EXISTS income (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL,
-                category TEXT,
-                description TEXT,
-                amount REAL NOT NULL,
-                currency TEXT DEFAULT 'USD',
-                transaction_type TEXT DEFAULT 'income'
-            )
-        """)
+        if not os.path.exists(self.expenses_file):
+            self.save_json_file(self.expenses_file, [])
         
-        # Exchange rates cache table
-        self.cur.execute("""
-            CREATE TABLE IF NOT EXISTS exchange_rates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                base_currency TEXT,
-                target_currency TEXT,
-                rate REAL,
-                date TEXT
-            )
-        """)
-        
-        # Update existing tables to add new columns if they don't exist
-        self.update_existing_tables()
-        
-        self.conn.commit()
-    
-    def update_existing_tables(self):
-        """Update existing tables to add new columns for backward compatibility"""
+        if not os.path.exists(self.rates_file):
+            self.save_json_file(self.rates_file, {})
+
+    def load_json_file(self, filepath):
+        """Load data from JSON file"""
         try:
-            # Check if currency column exists in expenses table
-            self.cur.execute("PRAGMA table_info(expenses)")
-            columns = [column[1] for column in self.cur.fetchall()]
-            
-            if 'currency' not in columns:
-                self.cur.execute("ALTER TABLE expenses ADD COLUMN currency TEXT DEFAULT 'USD'")
-            
-            if 'transaction_type' not in columns:
-                self.cur.execute("ALTER TABLE expenses ADD COLUMN transaction_type TEXT DEFAULT 'expense'")
-                
-        except sqlite3.OperationalError:
-            # Table doesn't exist yet, will be created above
-            pass
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return [] if 'rates' not in filepath else {}
+
+    def save_json_file(self, filepath, data):
+        """Save data to JSON file"""
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save data: {e}")
 
     def setup_ui(self):
         """Setup the main UI with tabs"""
@@ -298,12 +273,12 @@ class PersonalFinanceTracker:
                 data = response.json()
                 self.exchange_rates = data["rates"]
                 
-                # Cache the rates in database
-                self.cur.execute("DELETE FROM exchange_rates")
-                for currency, rate in self.exchange_rates.items():
-                    self.cur.execute("INSERT INTO exchange_rates (base_currency, target_currency, rate, date) VALUES (?,?,?,?)",
-                                   ("USD", currency, rate, datetime.now().strftime("%Y-%m-%d")))
-                self.conn.commit()
+                # Save the rates to file
+                self.save_json_file(self.rates_file, {
+                    "base_currency": "USD",
+                    "rates": self.exchange_rates,
+                    "date": datetime.now().strftime("%Y-%m-%d")
+                })
                 
                 self.update_rates_display()
                 messagebox.showinfo("Success", "Exchange rates updated successfully!")
@@ -360,19 +335,27 @@ class PersonalFinanceTracker:
             messagebox.showerror("Input error", "Amount must be a number")
             return
         
-        # Insert into appropriate table
-        if transaction_type == "income":
-            self.cur.execute(
-                "INSERT INTO income (date, category, description, amount, currency, transaction_type) VALUES (?,?,?,?,?,?)",
-                (date, category, desc, amount, currency, transaction_type)
-            )
-        else:
-            self.cur.execute(
-                "INSERT INTO expenses (date, category, description, amount, currency, transaction_type) VALUES (?,?,?,?,?,?)",
-                (date, category, desc, amount, currency, transaction_type)
-            )
+        # Create transaction record
+        transaction = {
+            "id": datetime.now().timestamp(),  # Use timestamp as unique ID
+            "date": date,
+            "category": category,
+            "description": desc,
+            "amount": amount,
+            "currency": currency,
+            "transaction_type": transaction_type
+        }
         
-        self.conn.commit()
+        # Save to appropriate file
+        if transaction_type == "income":
+            income_data = self.load_json_file(self.income_file)
+            income_data.append(transaction)
+            self.save_json_file(self.income_file, income_data)
+        else:
+            expenses_data = self.load_json_file(self.expenses_file)
+            expenses_data.append(transaction)
+            self.save_json_file(self.expenses_file, expenses_data)
+        
         self.refresh_data()
         self.clear_fields()
 
@@ -392,12 +375,30 @@ class PersonalFinanceTracker:
         transactions = []
         
         # Get income
-        for row in self.cur.execute("SELECT id, date, category, description, amount, currency, transaction_type FROM income ORDER BY date DESC"):
-            transactions.append(row)
+        income_data = self.load_json_file(self.income_file)
+        for transaction in income_data:
+            transactions.append((
+                transaction["id"],
+                transaction["date"],
+                transaction["category"],
+                transaction["description"],
+                transaction["amount"],
+                transaction["currency"],
+                transaction["transaction_type"]
+            ))
         
         # Get expenses
-        for row in self.cur.execute("SELECT id, date, category, description, amount, currency, transaction_type FROM expenses ORDER BY date DESC"):
-            transactions.append(row)
+        expenses_data = self.load_json_file(self.expenses_file)
+        for transaction in expenses_data:
+            transactions.append((
+                transaction["id"],
+                transaction["date"],
+                transaction["category"],
+                transaction["description"],
+                transaction["amount"],
+                transaction["currency"],
+                transaction["transaction_type"]
+            ))
         
         # Sort by date
         transactions.sort(key=lambda x: x[1], reverse=True)
@@ -416,13 +417,17 @@ class PersonalFinanceTracker:
         total_expenses = 0
         
         # Income total
-        for row in self.cur.execute("SELECT amount, currency FROM income"):
-            amount, currency = row
+        income_data = self.load_json_file(self.income_file)
+        for transaction in income_data:
+            amount = transaction["amount"]
+            currency = transaction["currency"]
             total_income += self.convert_currency(amount, currency, self.base_currency)
         
         # Expenses total
-        for row in self.cur.execute("SELECT amount, currency FROM expenses"):
-            amount, currency = row
+        expenses_data = self.load_json_file(self.expenses_file)
+        for transaction in expenses_data:
+            amount = transaction["amount"]
+            currency = transaction["currency"]
             total_expenses += self.convert_currency(amount, currency, self.base_currency)
         
         net_worth = total_income - total_expenses
@@ -443,10 +448,13 @@ class PersonalFinanceTracker:
         # Get all categories
         categories = set()
         
-        for row in self.cur.execute("SELECT category FROM income"):
-            categories.add(row[0])
-        for row in self.cur.execute("SELECT category FROM expenses"):
-            categories.add(row[0])
+        income_data = self.load_json_file(self.income_file)
+        for transaction in income_data:
+            categories.add(transaction["category"])
+        
+        expenses_data = self.load_json_file(self.expenses_file)
+        for transaction in expenses_data:
+            categories.add(transaction["category"])
         
         # Calculate totals per category
         for category in categories:
@@ -454,14 +462,18 @@ class PersonalFinanceTracker:
             expense_total = 0
             
             # Income for this category
-            for row in self.cur.execute("SELECT amount, currency FROM income WHERE category=?", (category,)):
-                amount, currency = row
-                income_total += self.convert_currency(amount, currency, self.base_currency)
+            for transaction in income_data:
+                if transaction["category"] == category:
+                    amount = transaction["amount"]
+                    currency = transaction["currency"]
+                    income_total += self.convert_currency(amount, currency, self.base_currency)
             
             # Expenses for this category
-            for row in self.cur.execute("SELECT amount, currency FROM expenses WHERE category=?", (category,)):
-                amount, currency = row
-                expense_total += self.convert_currency(amount, currency, self.base_currency)
+            for transaction in expenses_data:
+                if transaction["category"] == category:
+                    amount = transaction["amount"]
+                    currency = transaction["currency"]
+                    expense_total += self.convert_currency(amount, currency, self.base_currency)
             
             net = income_total - expense_total
             
@@ -508,16 +520,22 @@ class PersonalFinanceTracker:
             
             # Calculate income for this month
             month_income = 0
-            for row in self.cur.execute("SELECT amount, currency FROM income WHERE date LIKE ?", (f"{month_str}%",)):
-                amount, currency = row
-                month_income += self.convert_currency(amount, currency, self.base_currency)
+            income_data_file = self.load_json_file(self.income_file)
+            for transaction in income_data_file:
+                if transaction["date"].startswith(month_str):
+                    amount = transaction["amount"]
+                    currency = transaction["currency"]
+                    month_income += self.convert_currency(amount, currency, self.base_currency)
             income_data.insert(0, month_income)
             
             # Calculate expenses for this month
             month_expenses = 0
-            for row in self.cur.execute("SELECT amount, currency FROM expenses WHERE date LIKE ?", (f"{month_str}%",)):
-                amount, currency = row
-                month_expenses += self.convert_currency(amount, currency, self.base_currency)
+            expenses_data_file = self.load_json_file(self.expenses_file)
+            for transaction in expenses_data_file:
+                if transaction["date"].startswith(month_str):
+                    amount = transaction["amount"]
+                    currency = transaction["currency"]
+                    month_expenses += self.convert_currency(amount, currency, self.base_currency)
             expense_data.insert(0, month_expenses)
         
         # Create chart
@@ -533,8 +551,11 @@ class PersonalFinanceTracker:
         """Create pie chart of expense categories"""
         categories = {}
         
-        for row in self.cur.execute("SELECT category, amount, currency FROM expenses"):
-            category, amount, currency = row
+        expenses_data = self.load_json_file(self.expenses_file)
+        for transaction in expenses_data:
+            category = transaction["category"]
+            amount = transaction["amount"]
+            currency = transaction["currency"]
             converted_amount = self.convert_currency(amount, currency, self.base_currency)
             categories[category] = categories.get(category, 0) + converted_amount
         
@@ -552,36 +573,43 @@ class PersonalFinanceTracker:
         categories = set()
         
         # Get all categories
-        for row in self.cur.execute("SELECT category FROM income"):
-            categories.add(row[0])
-        for row in self.cur.execute("SELECT category FROM expenses"):
-            categories.add(row[0])
+        income_data = self.load_json_file(self.income_file)
+        for transaction in income_data:
+            categories.add(transaction["category"])
+        
+        expenses_data = self.load_json_file(self.expenses_file)
+        for transaction in expenses_data:
+            categories.add(transaction["category"])
         
         categories = list(categories)
-        income_data = []
-        expense_data = []
+        income_data_chart = []
+        expense_data_chart = []
         
         for category in categories:
             # Income for this category
             income_total = 0
-            for row in self.cur.execute("SELECT amount, currency FROM income WHERE category=?", (category,)):
-                amount, currency = row
-                income_total += self.convert_currency(amount, currency, self.base_currency)
-            income_data.append(income_total)
+            for transaction in income_data:
+                if transaction["category"] == category:
+                    amount = transaction["amount"]
+                    currency = transaction["currency"]
+                    income_total += self.convert_currency(amount, currency, self.base_currency)
+            income_data_chart.append(income_total)
             
             # Expenses for this category
             expense_total = 0
-            for row in self.cur.execute("SELECT amount, currency FROM expenses WHERE category=?", (category,)):
-                amount, currency = row
-                expense_total += self.convert_currency(amount, currency, self.base_currency)
-            expense_data.append(expense_total)
+            for transaction in expenses_data:
+                if transaction["category"] == category:
+                    amount = transaction["amount"]
+                    currency = transaction["currency"]
+                    expense_total += self.convert_currency(amount, currency, self.base_currency)
+            expense_data_chart.append(expense_total)
         
         if categories:
             x = range(len(categories))
             width = 0.35
             
-            ax.bar([i - width/2 for i in x], income_data, width, label='Income')
-            ax.bar([i + width/2 for i in x], expense_data, width, label='Expenses')
+            ax.bar([i - width/2 for i in x], income_data_chart, width, label='Income')
+            ax.bar([i + width/2 for i in x], expense_data_chart, width, label='Expenses')
             
             ax.set_title("Income vs Expenses by Category")
             ax.set_xlabel("Categories")
@@ -599,12 +627,17 @@ class PersonalFinanceTracker:
             messagebox.showinfo("Info", "Select a row to delete")
             return
         
-        rid = int(sel[0])
+        transaction_id = float(sel[0])
         if messagebox.askyesno("Confirm", "Delete selected transaction?"):
-            # Try to delete from both tables
-            self.cur.execute("DELETE FROM income WHERE id=?", (rid,))
-            self.cur.execute("DELETE FROM expenses WHERE id=?", (rid,))
-            self.conn.commit()
+            # Try to delete from both files
+            income_data = self.load_json_file(self.income_file)
+            income_data = [t for t in income_data if t["id"] != transaction_id]
+            self.save_json_file(self.income_file, income_data)
+            
+            expenses_data = self.load_json_file(self.expenses_file)
+            expenses_data = [t for t in expenses_data if t["id"] != transaction_id]
+            self.save_json_file(self.expenses_file, expenses_data)
+            
             self.refresh_data()
             self.clear_fields()
 
@@ -616,12 +649,30 @@ class PersonalFinanceTracker:
                 writer.writerow(["id", "date", "type", "category", "description", "amount", "currency"])
                 
                 # Export income
-                for row in self.cur.execute("SELECT id, date, category, description, amount, currency FROM income"):
-                    writer.writerow(row + ("income",))
+                income_data = self.load_json_file(self.income_file)
+                for transaction in income_data:
+                    writer.writerow([
+                        transaction["id"],
+                        transaction["date"],
+                        "income",
+                        transaction["category"],
+                        transaction["description"],
+                        transaction["amount"],
+                        transaction["currency"]
+                    ])
                 
                 # Export expenses
-                for row in self.cur.execute("SELECT id, date, category, description, amount, currency FROM expenses"):
-                    writer.writerow(row + ("expense",))
+                expenses_data = self.load_json_file(self.expenses_file)
+                for transaction in expenses_data:
+                    writer.writerow([
+                        transaction["id"],
+                        transaction["date"],
+                        "expense",
+                        transaction["category"],
+                        transaction["description"],
+                        transaction["amount"],
+                        transaction["currency"]
+                    ])
             
             messagebox.showinfo("Exported", "Exported to transactions_export.csv")
         except Exception as e:
@@ -640,25 +691,32 @@ class PersonalFinanceTracker:
         if not sel:
             return
         
-        rid = int(sel[0])
+        transaction_id = float(sel[0])
         
         # Try to get from income first
-        self.cur.execute("SELECT date, category, description, amount, currency, transaction_type FROM income WHERE id=?", (rid,))
-        row = self.cur.fetchone()
+        income_data = self.load_json_file(self.income_file)
+        transaction = None
         
-        if not row:
+        for t in income_data:
+            if t["id"] == transaction_id:
+                transaction = t
+                break
+        
+        if not transaction:
             # Try expenses
-            self.cur.execute("SELECT date, category, description, amount, currency, transaction_type FROM expenses WHERE id=?", (rid,))
-            row = self.cur.fetchone()
+            expenses_data = self.load_json_file(self.expenses_file)
+            for t in expenses_data:
+                if t["id"] == transaction_id:
+                    transaction = t
+                    break
         
-        if row:
-            date, category, desc, amount, currency, trans_type = row
-            self.date_var.set(date)
-            self.category_var.set(category)
-            self.desc_var.set(desc)
-            self.amount_var.set(str(amount))
-            self.currency_var.set(currency)
-            self.transaction_type_var.set(trans_type)
+        if transaction:
+            self.date_var.set(transaction["date"])
+            self.category_var.set(transaction["category"])
+            self.desc_var.set(transaction["description"])
+            self.amount_var.set(str(transaction["amount"]))
+            self.currency_var.set(transaction["currency"])
+            self.transaction_type_var.set(transaction["transaction_type"])
 
     def sort_by(self, col, descending):
         """Sort tree by column"""
@@ -679,7 +737,6 @@ class PersonalFinanceTracker:
 
     def on_quit(self):
         """Clean up and quit"""
-        self.conn.close()
         self.root.destroy()
 
 
