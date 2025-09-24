@@ -47,12 +47,14 @@ python src/main.py
 - View current exchange rates
 - Update exchange rates from API
 
-## Database
+## Data Storage
 
-The application uses SQLite database with the following tables:
-- `income`: Income transactions
-- `expenses`: Expense transactions  
-- `exchange_rates`: Cached exchange rates
+The application uses JSON files for data storage in the `data/` directory:
+- `income.json`: Income transactions
+- `expenses.json`: Expense transactions  
+- `exchange_rates.json`: Cached exchange rates
+
+All data is stored in human-readable JSON format, making it easy to backup, transfer, or manually edit if needed.
 
 ## Currency Support
 
