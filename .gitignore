@@ -1,3 +1,5 @@
 .venv
 .DS_Store
 expenses.db
+data/
+transactions_export.csv
